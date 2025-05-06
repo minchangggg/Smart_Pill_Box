@@ -1,0 +1,9 @@
+../Core/Src/DFPlayer.c:28:13:Send_cmd	32	static
+../Core/Src/DFPlayer.c:39:6:DF_Init	24	static
+../Core/Src/DFPlayer.c:51:6:DF_Update	16	static
+../Core/Src/DFPlayer.c:139:6:DF_PlayFromStart	16	static
+../Core/Src/DFPlayer.c:148:6:DF_Pause	16	static
+../Core/Src/DFPlayer.c:157:6:DF_Playback	16	static
+../Core/Src/DFPlayer.c:166:6:DF_Next	16	static
+../Core/Src/DFPlayer.c:175:6:DF_Previous	16	static
+../Core/Src/DFPlayer.c:184:6:Check_Key	24	static

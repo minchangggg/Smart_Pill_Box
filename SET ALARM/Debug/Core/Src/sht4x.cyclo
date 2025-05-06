@@ -1,0 +1,2 @@
+../Core/Src/sht4x.c:6:8:sht4x_init	1
+../Core/Src/sht4x.c:10:8:sht4x_measure_blocking_read	1

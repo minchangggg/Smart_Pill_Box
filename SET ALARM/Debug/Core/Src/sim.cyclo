@@ -1,0 +1,4 @@
+../Core/Src/sim.c:10:6:SIM_SendString	1
+../Core/Src/sim.c:14:6:SIM_SendCtrlZ	1
+../Core/Src/sim.c:20:6:SIM_SendSMS_Init	1
+../Core/Src/sim.c:30:6:SIM_SendSMS_Update	14

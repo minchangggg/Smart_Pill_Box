@@ -1,0 +1,722 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <time.h>
+#include <stdint.h>
+
+#include "delay.h"
+
+#include "ssd1306.h"
+#include "fonts.h"
+#include "ds1307_for_stm32_hal.h"
+
+#include "sht4x.h"
+#include "sensirion_i2c_hal.h"
+
+#include "DFPlayer.h"
+#include "sim.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+typedef struct ALARM_TIME{
+	uint8_t Hour;   // Hour of the alarm (0-23)
+	uint8_t Minute; // Minute of the alarm (0-59)
+} ALARM_TIME;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define INIT_RTC_TIME 1  // Define to initialize RTC with default time (1: TRUE, 0: FALSE)
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
+TIM_HandleTypeDef htim1; // Timer 1 handle for millisecond delay
+TIM_HandleTypeDef htim3; // Timer 3 handle for 1-second updates
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2; // DFPlayer communication
+UART_HandleTypeDef huart3; // SIM module communication
+
+/* USER CODE BEGIN PV */
+volatile uint32_t tick_ms = 0;  // Counter for mili sec
+volatile uint32_t tick_us = 0;  // Counter for micro sec
+
+const char* dayOfWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+DS1307_TIME current_time;  // Current time from DS1307
+ALARM_TIME set_time;       // Alarm time set
+
+DFPlayer_Context df_ctx;
+SMS_Context sim_ctx;
+
+int current_time_to_mins = 0;
+int set_time_to_mins = 0;
+int lower_bound_mins = 0; // settime-30mins
+int upper_bound_mins = 0; // settime+30mins
+
+float temp = 0.0f;
+float humi = 0.0f;
+
+volatile uint8_t flag_update_time = 0; 			// Flag to update time every second
+
+volatile uint8_t current_box_cnt = 0;  			// debug only: count how many times button pressed
+volatile uint8_t box_mode = 0;         			// 0: Box closed, 1: Box opened
+
+uint32_t tick = 0;              				// Debug flag for timer events
+
+volatile uint8_t already_warned_mp3 = 0; 		// Ensure MP3 is played only once
+
+volatile uint8_t already_warned_sms = 0; 		// Ensure SMS is sent only once
+volatile uint8_t send_sms_now = 0;              // Flag to trigger SMS sending
+char sms_message[50];  							// Buffer to store SMS message content
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_TIM1_Init(void);
+/* USER CODE BEGIN PFP */
+// Convert time structures to minutes
+void Convert_Time_To_Mins(DS1307_TIME _current_time, ALARM_TIME _set_time, int *_current_time_to_mins, int *_set_time_to_mins, int *_lower_bound_mins, int *_upper_bound_mins);
+// Display time, temperature, humidity, and alarm on OLED.
+void Display_On_Oled(DS1307_TIME _current_time, ALARM_TIME _set_time, float _temp, float _humi);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+// External interrupt callback for button press on PC14.
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN)
+{
+    if (GPIO_PIN == GPIO_PIN_14)
+    {
+//    	HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_15); // Test button
+		current_box_cnt++; // // Increment button press counter for debugging
+		for(int i = 0; i < 100000; i++); // Simple debounce delay
+
+		// Wait for button release with timeout
+		int timeout = 0;
+		while(!HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_14) && (timeout < 50000)) // Đợi đến khi thả nút nhấn trong khoảng thời gian nhất định
+		{
+			timeout++;
+		}
+		EXTI->PR |= GPIO_PIN_14; // Clear interrupt pending bit
+
+		// Check if current time is within valid window [ timeset-30mins ; timeset+30mins )
+		uint8_t is_valid_press_button = (lower_bound_mins <= upper_bound_mins)
+			? (current_time_to_mins >= lower_bound_mins && current_time_to_mins <= upper_bound_mins)
+			: (current_time_to_mins >= lower_bound_mins || current_time_to_mins <= upper_bound_mins);
+	    // Check if within music window [ set_time ; set_time+30mins )
+	    uint8_t in_window_mp3 = (set_time_to_mins < upper_bound_mins)
+		    ? (current_time_to_mins >= set_time_to_mins && current_time_to_mins <= upper_bound_mins)
+		    : (current_time_to_mins >= set_time_to_mins || current_time_to_mins <= upper_bound_mins);
+
+		if (is_valid_press_button)
+		{
+			box_mode = 1;  // Box opened
+			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+
+			// Pause music only if within music window and music is playing
+			if (in_window_mp3 && df_ctx.state == DF_IDLE && df_ctx.is_playing)
+			{
+				DF_Pause(&df_ctx); // Pause the music playback
+			}
+		}
+		else
+		{
+			box_mode = 0; // Box remains closed outside the time window
+			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+		}
+    }
+}
+
+// Timer interrupt callback (every 1 second)
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Instance == TIM1)
+	{
+		tick_ms++;  	  // Increment millisecond counter
+		tick_us += 1000;  // Increment microsecond counter (1000 µs = 1 ms)
+	}
+    if (htim->Instance == TIM3)
+    {
+	  HAL_GPIO_TogglePin (GPIOC, GPIO_PIN_13);
+	  flag_update_time = 1; // // Set flag to update display and logic
+
+	  // Convert to minutes
+	  current_time = DS1307_GetTime();
+	  Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
+
+      // Check if current time is within valid window [ set_time-30mins ; set_time+30mins + 3mins) | 3mins = time to reset para
+      uint8_t is_valid_press = (lower_bound_mins < (upper_bound_mins+3)%1440)
+          ? (current_time_to_mins >= lower_bound_mins && current_time_to_mins <= (upper_bound_mins+3)%1440)
+          : (current_time_to_mins >= lower_bound_mins || current_time_to_mins <= (upper_bound_mins+3)%1440);
+
+	  // Check if within music window [ set_time ; set_time+30mins )
+      uint8_t in_window_mp3 = (set_time_to_mins < upper_bound_mins)
+          ? (current_time_to_mins >= set_time_to_mins && current_time_to_mins <= upper_bound_mins)
+          : (current_time_to_mins >= set_time_to_mins || current_time_to_mins <= upper_bound_mins);
+
+      if (is_valid_press)
+      {
+    	  if(box_mode)
+    	  {
+    		  if(already_warned_mp3)
+    		  {
+    			  DF_Pause(&df_ctx); // Ensure music is paused if box is open
+    		  }
+    		  return; // Box already opened, no need to play music or send SMS
+    	  }
+    	  else if(in_window_mp3 && !already_warned_mp3)
+    	  {
+        	  // Play music func
+    		  // Trigger music playback
+        	  DF_PlayFromStart(&df_ctx);
+    		  already_warned_mp3 = 1;
+    		  tick = 1; // // Debug flag
+    	  }
+    	  else if((current_time_to_mins > upper_bound_mins) && !already_warned_sms)
+    	  {
+    		  // Send SMS
+    		  DF_Pause(&df_ctx);
+    		  // Trigger SMS sending at the exact time
+    		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+    		  tick = 2; // // Debug flag
+			  send_sms_now = 1;
+			  already_warned_sms = 1;
+    	  }
+      }
+      else
+      {
+    	  // Reset all states outside valid window
+		  box_mode = 0; 		  // Ensure box is closed
+		  already_warned_mp3 = 0; // Ensure MP3 is played only once
+		  send_sms_now = 0;       // Reset SMS trigger
+		  already_warned_sms = 0; // Ensure SMS is sent only once
+      }
+    }
+}
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
+  MX_TIM1_Init();
+  /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim3);
+
+  // Initialize delay module using Timer 1
+  delay_init();
+
+  // Initialize DS1307, OLED, and SHT4x
+  DS1307_Init(&hi2c1);        // Initialize RTC
+  SSD1306_Init();             // Initialize OLED display
+  sensirion_i2c_init();       // Initialize I2C HAL wrapper
+  sht4x_init();               // Initialize SHT4x sensor
+
+  // Initialize DFPlayer with volume 10
+  DF_Init(&df_ctx, &huart2, 10);
+
+  // Initialize SMS message with default alarm time
+  sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);
+  SIM_SendSMS_Init(&sim_ctx, &huart3, "+84935120229", sms_message);
+
+  // Set initial RTC time if needed
+  #if INIT_RTC_TIME
+	  DS1307_SetClockHalt(0);
+	  DS1307_SetTimeZone(+7, 0);
+	  DS1307_SetDate(04);
+	  DS1307_SetMonth(05);
+	  DS1307_SetYear(2025);
+	  DS1307_SetDayOfWeek(0);
+	  DS1307_SetHour(15);
+	  DS1307_SetMinute(00);
+	  DS1307_SetSecond(40);
+  #endif
+
+  // Set default alarm time
+  set_time.Hour = 15;
+  set_time.Minute = 01;
+
+  // Update SMS message with the set alarm time
+  sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);
+
+  // Initialize system state
+  box_mode = 0;           // Ensure box is closed
+  already_warned_mp3 = 0; // Reset music warning flag
+  send_sms_now = 0;       // Reset SMS trigger
+  already_warned_sms = 0; // Reset SMS warning flag
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+	  // Read temperature and humidity from SHT4x sensor
+	  sht4x_measure_blocking_read(&temp, &humi);
+
+	  // Update display and alarm logic if time update is triggered
+      if (flag_update_time)
+      {
+          flag_update_time = 0; // Clear update flag
+          current_time = DS1307_GetTime(); // Fetch current time
+          Display_On_Oled(current_time, set_time, temp, humi); // Update OLED display
+      }
+
+      // Manage SMS state machine and reset trigger
+	  SIM_SendSMS_Update(&sim_ctx, send_sms_now);
+	  if (send_sms_now && sim_ctx.state == SMS_IDLE) {
+		  send_sms_now = 0; // Reset SMS trigger after completion
+	  }
+
+	  // Update DFPlayer state machine
+	  DF_Update(&df_ctx);
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI_DIV2;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 7;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 999;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 7999;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 9600;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+void Convert_Time_To_Mins(DS1307_TIME _current_time, ALARM_TIME _set_time, int *_current_time_to_mins, int *_set_time_to_mins, int *_lower_bound_mins, int *_upper_bound_mins)
+{
+    // The permitted range: from (alarm - 30 minutes) to (alarm + 30 minutes)
+    *_current_time_to_mins = _current_time.Hour * 60 + _current_time.Minute;
+    *_set_time_to_mins = _set_time.Hour * 60 + _set_time.Minute;
+    *_lower_bound_mins = *_set_time_to_mins - 30;
+    *_upper_bound_mins = *_set_time_to_mins + 30;
+
+    // Handle if lower_bound is negative: wrap around to the previous day
+    if (*_lower_bound_mins < 0) *_lower_bound_mins += 1440; // 1440 minutes = 24 hours
+    // Handle if upper_bound exceeds 23:59
+    if (*_upper_bound_mins >= 1440) *_upper_bound_mins -= 1440;
+}
+void Display_On_Oled(DS1307_TIME _current_time, ALARM_TIME _set_time, float _temp, float _humi)
+{
+    char line1_oled[21];
+    char line2_oled[21];
+    char line3_oled[21];
+
+    sprintf(line1_oled, "Tem:%.1f Hum:%.1f%%", _temp, _humi);
+    sprintf(line2_oled, "%s,%02d/%02d %02d:%02d:%02d", dayOfWeek[_current_time.DoW], _current_time.Date, _current_time.Month, _current_time.Hour, _current_time.Minute, _current_time.Second); // "%04d", _current_time.Year
+    sprintf(line3_oled, "Alarm_Time:[%02d:%02d]", _set_time.Hour, _set_time.Minute);
+
+    SSD1306_Fill(SSD1306_COLOR_BLACK);
+    SSD1306_GotoXY(0,10); SSD1306_Puts(line1_oled, &Font_7x10, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(0,30); SSD1306_Puts(line2_oled, &Font_7x10, SSD1306_COLOR_WHITE);
+    SSD1306_GotoXY(0,50); SSD1306_Puts(line3_oled, &Font_7x10, SSD1306_COLOR_WHITE);
+    SSD1306_UpdateScreen();
+}
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

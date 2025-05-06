@@ -1,0 +1,7 @@
+../Core/Src/delay.c:6:6:delay_init	8	static
+../Core/Src/delay.c:20:10:get_tick_ms	4	static
+../Core/Src/delay.c:25:10:get_tick_us	4	static
+../Core/Src/delay.c:31:6:delay_ms_nonblocking	16	static
+../Core/Src/delay.c:36:6:delay_us_nonblocking	16	static
+../Core/Src/delay.c:41:6:is_delay_ms_complete	16	static
+../Core/Src/delay.c:46:6:is_delay_us_complete	16	static

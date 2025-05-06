@@ -47,14 +47,19 @@ typedef struct ALARM_TIME{
 	uint8_t Minute; // Minute of the alarm (0-59)
 } ALARM_TIME;
 
+/*SystemState => State machine để quản lý quá trình cài đặt thời gian báo thức qua HC-05*/
 typedef enum {
+    /*Trạng thái nghỉ*/
     IDLE,
+    /*Các trạng thái để nhập giờ.*/
     SET_HOUR,
     SET_HOUR_INPUT,  // State to input hour value
     SET_HOUR_TENS,   // State to input second digit of hour
+    /*Các trạng thái để nhập phút.*/
     SET_MIN,
     SET_MIN_INPUT,   // State to input minute value
     SET_MIN_TENS,    // State to input second digit of minute
+    /*Xác nhận thời gian báo thức.*/
     CONFIRM
 } SystemState;
 /* USER CODE END PTD */
@@ -146,6 +151,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         switch (current_state)
         {
             case IDLE:
+	    /*
+            Điều kiện: Chờ ký tự S (START).
+	    Hành động:
+		Reset các biến set_time, set_time_to_mins, lower_bound_mins, upper_bound_mins về 0.
+		Chuyển sang SET_HOUR.
+		Gửi thông báo qua UART1: "PRESS [SET HOUR]\r\n".
+	    Mục đích: Khởi động quy trình cài đặt khi nhận lệnh bắt đầu.
+	    */
                 if (rxData == 'S') // 'S' for START
                 {
                     // Reset set_time and bounds when starting new input
@@ -160,6 +173,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_HOUR:
+	    /*
+            Điều kiện: Chờ ký tự H (SET HOUR).
+            Hành động:
+		Gửi thông báo: "Enter H (0-23)\r\n".
+		Chuyển sang SET_HOUR_INPUT.
+            Mục đích: Yêu cầu người dùng nhập giờ (0-23).
+            */
                 if (rxData == 'H') // 'H' for SET HOUR
                 {
                     HAL_UART_Transmit(&huart1, (uint8_t*)"Enter H (0-23)\r\n", strlen("Enter H (0-23)\r\n"), UART_TIMEOUT);
@@ -168,6 +188,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_HOUR_INPUT:
+	    /*
+     	    Điều kiện: Nhận ký tự đầu tiên của giờ (0-2).
+	    Hành động:
+		Chuyển ký tự ASCII thành số nguyên (rxData - '0').
+		Lưu vào set_time.Hour (chỉ chữ số đầu tiên).
+		Chuyển sang SET_HOUR_TENS.
+		Gọi HAL_UART_Receive_IT để nhận chữ số thứ hai.
+   	    Mục đích: Nhận chữ số hàng chục của giờ (0-2).
+            */
                 if (rxData >= '0' && rxData <= '2') // First digit of hour (0-2)
                 {
                     set_time.Hour = rxData - '0'; // Convert ASCII to integer
@@ -177,6 +206,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_HOUR_TENS:
+	    /*
+	    Điều kiện: Nhận chữ số thứ hai của giờ:
+		Nếu set_time.Hour = 2, chấp nhận 0-3 (cho 20-23).
+		Nếu set_time.Hour < 2, chấp nhận 0-9 (cho 00-19).
+	    Hành động:
+		Ghép chữ số thứ hai vào set_time.Hour (ví dụ: 2 + 3 = 23).
+		Chuyển sang SET_MIN.
+		Gửi thông báo: "PRESS [SET MIN]\r\n".
+	    Mục đích: Hoàn tất nhập giờ và chuyển sang nhập phút.
+            */
                 if (set_time.Hour == 2 && rxData >= '0' && rxData <= '3') // Second digit for 20-23
                 {
                     set_time.Hour = (set_time.Hour * 10) + (rxData - '0');
@@ -192,6 +231,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_MIN:
+	    /*
+    	    Điều kiện: Chờ ký tự M (SET MIN).
+	    Hành động:
+		Gửi thông báo: "Enter M (0-59)\r\n".
+		Chuyển sang SET_MIN_INPUT.
+	    Mục đích: Yêu cầu người dùng nhập phút (0-59).
+            */
                 if (rxData == 'M') // 'M' for SET MIN
                 {
                     HAL_UART_Transmit(&huart1, (uint8_t*)"Enter M (0-59)\r\n", strlen("Enter M (0-59)\r\n"), UART_TIMEOUT);
@@ -200,6 +246,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_MIN_INPUT:
+	    /*
+	    Điều kiện: Nhận ký tự đầu tiên của phút (0-5).
+	    Hành động:
+		Chuyển ký tự ASCII thành số nguyên.
+		Lưu vào set_time.Minute (chỉ chữ số đầu tiên).
+		Chuyển sang SET_MIN_TENS.
+		Gọi HAL_UART_Receive_IT để nhận chữ số thứ hai.
+	    Mục đích: Nhận chữ số hàng chục của phút (0-5).
+            */
                 if (rxData >= '0' && rxData <= '5') // First digit of minute (0-5)
                 {
                     set_time.Minute = rxData - '0'; // Convert ASCII to integer
@@ -209,6 +264,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case SET_MIN_TENS:
+	    /*
+	    Điều kiện: Nhận chữ số thứ hai của phút (0-9).
+	    Hành động:
+		Ghép chữ số thứ hai vào set_time.Minute (ví dụ: 5 + 9 = 59).
+		Chuyển sang CONFIRM.
+		Gửi thông báo: "Press [CONFIRM]\r\n".
+    	    Mục đích: Hoàn tất nhập phút.
+            */
                 if (rxData >= '0' && rxData <= '9') // Second digit for 00-59
                 {
                     set_time.Minute = (set_time.Minute * 10) + (rxData - '0');
@@ -218,6 +281,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                 break;
 
             case CONFIRM:
+	    /*
+    	    Điều kiện: Chờ ký tự C (CONFIRM).
+	    Hành động:
+		Hiển thị thời gian đã đặt: "Set to %02d:%02d\r\n".
+		Quay về IDLE.
+		Gửi thông báo: "DONE\r\n".
+		Cập nhật tin nhắn SMS với thời gian mới.
+		Tính lại các khoảng thời gian (lower_bound_mins, upper_bound_mins) bằng Convert_Time_To_Mins.
+	    Mục đích: Xác nhận và lưu thời gian báo thức.
+            */
                 if (rxData == 'C') // 'C' for CONFIRM
                 {
                     char confirm_msg[20];

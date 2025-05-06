@@ -37,6 +37,19 @@ typedef struct {
     uint8_t is_paused;          // 1: Đang tạm dừng, 0: Không tạm dừng
 } DFPlayer_Context;
 
+/*
+1) Dùng con trỏ Truyền tham chiếu để thay đổi giá trị của biến
+Nếu không dùng con trỏ, mà truyền df_ctx trực tiếp vào hàm 
+=> Khi gọi DF_Init(df_ctx, &huart2, 20), tham số ctx trong hàm là một bản sao của df_ctx. 
+=> Mọi thay đổi (như ctx.state = DF_INIT) chỉ ảnh hưởng đến bản sao này, không ảnh hưởng đến df_ctx gốc trong main.c. Sau khi hàm kết thúc, df_ctx vẫn giữ nguyên giá trị ban đầu.
+
+2) Cấu trúc DFPlayer_Context chứa 7 biến, chiếm một lượng bộ nhớ đáng kể (khoảng 16 byte trên STM32F1). Nếu truyền cấu trúc này trực tiếp vào hàm (pass-by-value), 
+mỗi lần gọi hàm sẽ tạo một bản sao của toàn bộ cấu trúc, gây lãng phí bộ nhớ và thời gian xử lý.
+=> Khi sử dụng con trỏ, bạn chỉ truyền địa chỉ của cấu trúc (4 byte trên STM32F1), thay vì sao chép toàn bộ dữ liệu. Điều này giúp:
+- Tiết kiệm bộ nhớ stack (bộ nhớ dùng để lưu trữ tham số và biến cục bộ trong hàm).
+- Tăng hiệu suất, đặc biệt khi hàm được gọi thường xuyên (như DF_Update trong vòng lặp chính).
+*/
+
 // Hàm khởi tạo context cho DFPlayer
 void DF_Init(DFPlayer_Context *ctx, UART_HandleTypeDef *huart, uint8_t volume);
 

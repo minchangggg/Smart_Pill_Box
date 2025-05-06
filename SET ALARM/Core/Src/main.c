@@ -50,9 +50,7 @@ typedef struct ALARM_TIME{
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define INIT_RTC_TIME 1     // Init RTC with default time (1: On, 0: Off)
-#define PREDEFINED_INPUT 1  // Use predefined alarm time (1: On, 0: Off)
-#define USER_INPUT 0        // Allow user to set alarm time (1: On, 0: Off)
+#define INIT_RTC_TIME 1  // Define to initialize RTC with default time (1: TRUE, 0: FALSE)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,12 +61,12 @@ typedef struct ALARM_TIME{
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim1; // Timer 1 handle for millisecond delay
+TIM_HandleTypeDef htim3; // Timer 3 handle for 1-second updates
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
-UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart2; // DFPlayer communication
+UART_HandleTypeDef huart3; // SIM module communication
 
 /* USER CODE BEGIN PV */
 volatile uint32_t tick_ms = 0;  // Counter for mili sec
@@ -93,7 +91,6 @@ volatile uint8_t flag_update_time = 0; 			// Flag to update time every second
 
 volatile uint8_t current_box_cnt = 0;  			// debug only: count how many times button pressed
 volatile uint8_t box_mode = 0;         			// 0: Box closed, 1: Box opened
-volatile uint8_t alarm_completed = 0;           // Flag to track if alarm has been fully handled
 
 uint32_t tick = 0;              				// Debug flag for timer events
 
@@ -151,15 +148,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN)
 		if (is_valid_press_button)
 		{
 			box_mode = 1;  // Box opened
-			alarm_completed = 1;  // Mark alarm as completed
 			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
 
 			// Pause music only if within music window and music is playing
-//			if (in_window_mp3 && df_ctx.state == DF_IDLE && df_ctx.is_playing)
-			if (in_window_mp3 && df_ctx.is_playing)
+			if (in_window_mp3 && df_ctx.state == DF_IDLE && df_ctx.is_playing)
 			{
 				DF_Pause(&df_ctx); // Pause the music playback
-				already_warned_mp3 = 1; // Ensure music doesn't play again in this cycle
 			}
 		}
 		else
@@ -188,7 +182,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	  Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
 
       // Check if current time is within valid window [ set_time-30mins ; set_time+30mins + 3mins) | 3mins = time to reset para
-      uint8_t is_valid_alarm = (lower_bound_mins < (upper_bound_mins+3)%1440)
+      uint8_t is_valid_press = (lower_bound_mins < (upper_bound_mins+3)%1440)
           ? (current_time_to_mins >= lower_bound_mins && current_time_to_mins <= (upper_bound_mins+3)%1440)
           : (current_time_to_mins >= lower_bound_mins || current_time_to_mins <= (upper_bound_mins+3)%1440);
 
@@ -197,9 +191,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
           ? (current_time_to_mins >= set_time_to_mins && current_time_to_mins <= upper_bound_mins)
           : (current_time_to_mins >= set_time_to_mins || current_time_to_mins <= upper_bound_mins);
 
-      if (is_valid_alarm)
+      if (is_valid_press)
       {
-    	  if (box_mode || alarm_completed)
+    	  if(box_mode)
     	  {
     		  if(already_warned_mp3)
     		  {
@@ -306,14 +300,8 @@ int main(void)
   #endif
 
   // Set default alarm time
-  #if PREDEFINED_INPUT
-	set_time.Hour = 14;
-	set_time.Minute = 31;
-  #endif
-
-//  #if USER_INPUT
-//
-//  #endif
+  set_time.Hour = 15;
+  set_time.Minute = 01;
 
   // Update SMS message with the set alarm time
   sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);

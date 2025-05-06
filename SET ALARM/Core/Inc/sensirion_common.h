@@ -11,7 +11,7 @@ Các thư viện khác của Sensirion (như sht4x, sgp30, v.v.) đều sử d�
 - Tối ưu hóa mã nguồn:
 Tên ngắn gọn (s8, u16, v.v.) giúp giảm độ dài mã nguồn, phù hợp với các vi điều khiển có bộ nhớ hạn chế như STM32F1.
 - Hỗ trợ phát triển phần mềm:
-Cung cấp nền tảng cho các hàm xử lý dữ liệu cảm biến, chẳng hạn như chuyển đổi giá trị thô (raw data) từ cảm biến thành giá trị thực (như độ C hoặc % độ ẩm).
+Cung cấp nền tảng cho các hàm xử lý dữ liệu cảm biến, chẳng hạn như chuyển đổi GIÁ TRỊ THÔ (RAW DATA) từ cảm biến thành giá trị thực (như độ C hoặc % độ ẩm).
 */
 #include <stdint.h>
 typedef int8_t s8;

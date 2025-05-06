@@ -46,11 +46,27 @@ typedef struct ALARM_TIME{
 	uint8_t Hour;   // Hour of the alarm (0-23)
 	uint8_t Minute; // Minute of the alarm (0-59)
 } ALARM_TIME;
+
+typedef enum {
+    IDLE,
+    SET_HOUR,
+    SET_HOUR_INPUT,  // State to input hour value
+    SET_HOUR_TENS,   // State to input second digit of hour
+    SET_MIN,
+    SET_MIN_INPUT,   // State to input minute value
+    SET_MIN_TENS,    // State to input second digit of minute
+    CONFIRM
+} SystemState;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define INIT_RTC_TIME 1  // Define to initialize RTC with default time (1: TRUE, 0: FALSE)
+#define INIT_RTC_TIME 1     // Init RTC with default time (1: On, 0: Off)
+
+#define PREDEFINED_INPUT 1  // Use predefined alarm time (1: On, 0: Off)
+
+#define USER_INPUT 0        // Allow user to set alarm time (1: On, 0: Off)
+#define UART_TIMEOUT 100    // Timeout for UART transmission in milliseconds
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,20 +77,20 @@ typedef struct ALARM_TIME{
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim1; // Timer 1 handle for millisecond delay
-TIM_HandleTypeDef htim3; // Timer 3 handle for 1-second updates
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2; // DFPlayer communication
-UART_HandleTypeDef huart3; // SIM module communication
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-volatile uint32_t tick_ms = 0;  // Counter for mili sec
-volatile uint32_t tick_us = 0;  // Counter for micro sec
+volatile uint32_t tick_ms = 0; // Counter for mili sec
+volatile uint32_t tick_us = 0; // Counter for micro sec
 
 const char* dayOfWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 DS1307_TIME current_time;  // Current time from DS1307
-ALARM_TIME set_time;       // Alarm time set
+ALARM_TIME set_time = {0, 0}; // Alarm time set, initialized to 00:00;       // Alarm time set
 
 DFPlayer_Context df_ctx;
 SMS_Context sim_ctx;
@@ -91,6 +107,7 @@ volatile uint8_t flag_update_time = 0; 			// Flag to update time every second
 
 volatile uint8_t current_box_cnt = 0;  			// debug only: count how many times button pressed
 volatile uint8_t box_mode = 0;         			// 0: Box closed, 1: Box opened
+volatile uint8_t alarm_completed = 0;           // Flag to track if alarm has been fully handled
 
 uint32_t tick = 0;              				// Debug flag for timer events
 
@@ -99,6 +116,9 @@ volatile uint8_t already_warned_mp3 = 0; 		// Ensure MP3 is played only once
 volatile uint8_t already_warned_sms = 0; 		// Ensure SMS is sent only once
 volatile uint8_t send_sms_now = 0;              // Flag to trigger SMS sending
 char sms_message[50];  							// Buffer to store SMS message content
+
+uint8_t rxData;       							// Buffer to receive data from HC-05
+SystemState current_state = IDLE;               // Current state of the system
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -119,6 +139,108 @@ void Display_On_Oled(DS1307_TIME _current_time, ALARM_TIME _set_time, float _tem
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        switch (current_state)
+        {
+            case IDLE:
+                if (rxData == 'S') // 'S' for START
+                {
+                    // Reset set_time and bounds when starting new input
+                    set_time.Hour = 0;
+                    set_time.Minute = 0;
+                    set_time_to_mins = 0;
+                    lower_bound_mins = 0;
+                    upper_bound_mins = 0;
+                    current_state = SET_HOUR;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"PRESS [SET HOUR]\r\n", strlen("PRESS [SET HOUR]\r\n"), UART_TIMEOUT);
+                }
+                break;
+
+            case SET_HOUR:
+                if (rxData == 'H') // 'H' for SET HOUR
+                {
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"Enter H (0-23)\r\n", strlen("Enter H (0-23)\r\n"), UART_TIMEOUT);
+                    current_state = SET_HOUR_INPUT;
+                }
+                break;
+
+            case SET_HOUR_INPUT:
+                if (rxData >= '0' && rxData <= '2') // First digit of hour (0-2)
+                {
+                    set_time.Hour = rxData - '0'; // Convert ASCII to integer
+                    current_state = SET_HOUR_TENS; // Always wait for second digit
+                    HAL_UART_Receive_IT(&huart1, &rxData, 1); // Wait for next digit
+                }
+                break;
+
+            case SET_HOUR_TENS:
+                if (set_time.Hour == 2 && rxData >= '0' && rxData <= '3') // Second digit for 20-23
+                {
+                    set_time.Hour = (set_time.Hour * 10) + (rxData - '0');
+                    current_state = SET_MIN;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"PRESS [SET MIN]\r\n", strlen("PRESS [SET MIN]\r\n"), UART_TIMEOUT);
+                }
+                else if (set_time.Hour < 2 && rxData >= '0' && rxData <= '9') // Second digit for 00-19
+                {
+                    set_time.Hour = (set_time.Hour * 10) + (rxData - '0');
+                    current_state = SET_MIN;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"PRESS [SET MIN]\r\n", strlen("PRESS [SET MIN]\r\n"), UART_TIMEOUT);
+                }
+                break;
+
+            case SET_MIN:
+                if (rxData == 'M') // 'M' for SET MIN
+                {
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"Enter M (0-59)\r\n", strlen("Enter M (0-59)\r\n"), UART_TIMEOUT);
+                    current_state = SET_MIN_INPUT;
+                }
+                break;
+
+            case SET_MIN_INPUT:
+                if (rxData >= '0' && rxData <= '5') // First digit of minute (0-5)
+                {
+                    set_time.Minute = rxData - '0'; // Convert ASCII to integer
+                    HAL_UART_Receive_IT(&huart1, &rxData, 1); // Wait for next digit
+                    current_state = SET_MIN_TENS;
+                }
+                break;
+
+            case SET_MIN_TENS:
+                if (rxData >= '0' && rxData <= '9') // Second digit for 00-59
+                {
+                    set_time.Minute = (set_time.Minute * 10) + (rxData - '0');
+                    current_state = CONFIRM;
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"Press [CONFIRM]\r\n", strlen("Press [CONFIRM]\r\n"), UART_TIMEOUT);
+                }
+                break;
+
+            case CONFIRM:
+                if (rxData == 'C') // 'C' for CONFIRM
+                {
+                    char confirm_msg[20];
+                    sprintf(confirm_msg, "Set to %02d:%02d\r\n", set_time.Hour, set_time.Minute);
+                    HAL_UART_Transmit(&huart1, (uint8_t*)confirm_msg, strlen(confirm_msg), UART_TIMEOUT);
+                    current_state = IDLE; // Reset to initial state
+                    HAL_UART_Transmit(&huart1, (uint8_t*)"DONE\r\n", strlen("DONE\r\n"), UART_TIMEOUT);
+                    // Update SMS message with the new alarm time
+                    sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);
+                    // Recalculate bounds after setting new alarm time
+                    Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        // Prepare for next reception
+        HAL_UART_Receive_IT(&huart1, &rxData, 1);
+    }
+}
+
 // External interrupt callback for button press on PC14.
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN)
 {
@@ -148,12 +270,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN)
 		if (is_valid_press_button)
 		{
 			box_mode = 1;  // Box opened
+			alarm_completed = 1;  // Mark alarm as completed
 			HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
 
 			// Pause music only if within music window and music is playing
-			if (in_window_mp3 && df_ctx.state == DF_IDLE && df_ctx.is_playing)
+//			if (in_window_mp3 && df_ctx.state == DF_IDLE && df_ctx.is_playing)
+			if (in_window_mp3 && df_ctx.is_playing)
 			{
 				DF_Pause(&df_ctx); // Pause the music playback
+				already_warned_mp3 = 1; // Ensure music doesn't play again in this cycle
 			}
 		}
 		else
@@ -167,67 +292,73 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_PIN)
 // Timer interrupt callback (every 1 second)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Instance == TIM1)
-	{
-		tick_ms++;  	  // Increment millisecond counter
-		tick_us += 1000;  // Increment microsecond counter (1000 µs = 1 ms)
-	}
+    if (htim->Instance == TIM1)
+    {
+        tick_ms++;        // Increment millisecond counter
+        tick_us += 1000;  // Increment microsecond counter (1000 µs = 1 ms)
+    }
     if (htim->Instance == TIM3)
     {
-	  HAL_GPIO_TogglePin (GPIOC, GPIO_PIN_13);
-	  flag_update_time = 1; // // Set flag to update display and logic
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+        flag_update_time = 1; // Set flag to update display and logic
 
-	  // Convert to minutes
-	  current_time = DS1307_GetTime();
-	  Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
+        // Convert to minutes
+        current_time = DS1307_GetTime();
+        Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
 
-      // Check if current time is within valid window [ set_time-30mins ; set_time+30mins + 3mins) | 3mins = time to reset para
-      uint8_t is_valid_press = (lower_bound_mins < (upper_bound_mins+3)%1440)
-          ? (current_time_to_mins >= lower_bound_mins && current_time_to_mins <= (upper_bound_mins+3)%1440)
-          : (current_time_to_mins >= lower_bound_mins || current_time_to_mins <= (upper_bound_mins+3)%1440);
+        // Only process alarm logic if not in the process of setting time
+        if (current_state != IDLE)
+        {
+            return; // Skip alarm logic while setting time
+        }
 
-	  // Check if within music window [ set_time ; set_time+30mins )
-      uint8_t in_window_mp3 = (set_time_to_mins < upper_bound_mins)
-          ? (current_time_to_mins >= set_time_to_mins && current_time_to_mins <= upper_bound_mins)
-          : (current_time_to_mins >= set_time_to_mins || current_time_to_mins <= upper_bound_mins);
+        // Check if current time is within valid window [set_time-30mins ; set_time+30mins + 3mins)
+        uint8_t is_valid_alarm = (lower_bound_mins < (upper_bound_mins + 3) % 1440)
+            ? (current_time_to_mins >= lower_bound_mins && current_time_to_mins <= (upper_bound_mins + 3) % 1440)
+            : (current_time_to_mins >= lower_bound_mins || current_time_to_mins <= (upper_bound_mins + 3) % 1440);
 
-      if (is_valid_press)
-      {
-    	  if(box_mode)
-    	  {
-    		  if(already_warned_mp3)
-    		  {
-    			  DF_Pause(&df_ctx); // Ensure music is paused if box is open
-    		  }
-    		  return; // Box already opened, no need to play music or send SMS
-    	  }
-    	  else if(in_window_mp3 && !already_warned_mp3)
-    	  {
-        	  // Play music func
-    		  // Trigger music playback
-        	  DF_PlayFromStart(&df_ctx);
-    		  already_warned_mp3 = 1;
-    		  tick = 1; // // Debug flag
-    	  }
-    	  else if((current_time_to_mins > upper_bound_mins) && !already_warned_sms)
-    	  {
-    		  // Send SMS
-    		  DF_Pause(&df_ctx);
-    		  // Trigger SMS sending at the exact time
-    		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
-    		  tick = 2; // // Debug flag
-			  send_sms_now = 1;
-			  already_warned_sms = 1;
-    	  }
-      }
-      else
-      {
-    	  // Reset all states outside valid window
-		  box_mode = 0; 		  // Ensure box is closed
-		  already_warned_mp3 = 0; // Ensure MP3 is played only once
-		  send_sms_now = 0;       // Reset SMS trigger
-		  already_warned_sms = 0; // Ensure SMS is sent only once
-      }
+        // Check if within music window [set_time ; set_time+30mins)
+        uint8_t in_window_mp3 = (set_time_to_mins < upper_bound_mins)
+            ? (current_time_to_mins >= set_time_to_mins && current_time_to_mins <= upper_bound_mins)
+            : (current_time_to_mins >= set_time_to_mins || current_time_to_mins <= upper_bound_mins);
+
+        if (is_valid_alarm)
+        {
+            if (box_mode || alarm_completed)
+            {
+                if (already_warned_mp3)
+                {
+                    DF_Pause(&df_ctx); // Ensure music is paused if box is open
+                }
+                return; // Box already opened, no need to play music or send SMS
+            }
+            else if (in_window_mp3 && !already_warned_mp3)
+            {
+                // Play music
+                DF_PlayFromStart(&df_ctx);
+                already_warned_mp3 = 1;
+                tick = 1; // Debug flag
+            }
+            else if ((current_time_to_mins > upper_bound_mins) && !already_warned_sms)
+            {
+                // Send SMS only once
+                DF_Pause(&df_ctx);
+                HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
+                tick = 2; // Debug flag
+                send_sms_now = 1;
+                already_warned_sms = 1; // Set flag to prevent further SMS
+            }
+        }
+        else
+        {
+            // Reset all states outside valid window
+        	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+            box_mode = 0;           // Ensure box is closed
+            already_warned_mp3 = 0; // Reset music flag
+            send_sms_now = 0;       // Reset SMS trigger
+            already_warned_sms = 0; // Reset SMS flag
+            alarm_completed = 0;    // Reset alarm completion flag
+        }
     }
 }
 /* USER CODE END 0 */
@@ -280,7 +411,7 @@ int main(void)
   sht4x_init();               // Initialize SHT4x sensor
 
   // Initialize DFPlayer with volume 10
-  DF_Init(&df_ctx, &huart2, 10);
+  DF_Init(&df_ctx, &huart2, 15);
 
   // Initialize SMS message with default alarm time
   sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);
@@ -299,9 +430,21 @@ int main(void)
 	  DS1307_SetSecond(40);
   #endif
 
-  // Set default alarm time
-  set_time.Hour = 15;
-  set_time.Minute = 01;
+  // Set alarm time based on input mode
+  #if PREDEFINED_INPUT
+	  set_time.Hour = 14;
+	  set_time.Minute = 31;
+	  Convert_Time_To_Mins(current_time, set_time, &current_time_to_mins, &set_time_to_mins, &lower_bound_mins, &upper_bound_mins);
+  #elif USER_INPUT
+	  // Initial message to HC-05
+	  HAL_Delay(10);
+	  HAL_UART_Transmit(&huart1, (uint8_t*)"ALARM_PROJECT\r\n", strlen("ALARM_PROJECT\r\n"), UART_TIMEOUT);
+	  HAL_Delay(10);
+	  HAL_UART_Transmit(&huart1, (uint8_t*)"Press [START]\r\n", strlen("Press [START]\r\n"), UART_TIMEOUT);
+
+	  // Enable UART receive interrupt
+	  HAL_UART_Receive_IT(&huart1, &rxData, 1);
+  #endif
 
   // Update SMS message with the set alarm time
   sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);
@@ -311,6 +454,7 @@ int main(void)
   already_warned_mp3 = 0; // Reset music warning flag
   send_sms_now = 0;       // Reset SMS trigger
   already_warned_sms = 0; // Reset SMS warning flag
+  alarm_completed = 0;    // Reset alarm completion flag
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -321,17 +465,22 @@ int main(void)
 	  sht4x_measure_blocking_read(&temp, &humi);
 
 	  // Update display and alarm logic if time update is triggered
-      if (flag_update_time)
-      {
-          flag_update_time = 0; // Clear update flag
-          current_time = DS1307_GetTime(); // Fetch current time
-          Display_On_Oled(current_time, set_time, temp, humi); // Update OLED display
-      }
+	  if (flag_update_time)
+	  {
+		  flag_update_time = 0; // Clear update flag
+		  current_time = DS1307_GetTime(); // Fetch current time
+		  Display_On_Oled(current_time, set_time, temp, humi); // Update OLED display
+	  }
 
-      // Manage SMS state machine and reset trigger
-	  SIM_SendSMS_Update(&sim_ctx, send_sms_now);
-	  if (send_sms_now && sim_ctx.state == SMS_IDLE) {
-		  send_sms_now = 0; // Reset SMS trigger after completion
+	  // Manage SMS state machine
+	  if (send_sms_now)
+	  {
+		  SIM_SendSMS_Update(&sim_ctx, 1); // Trigger SMS sending
+		  send_sms_now = 0; // Reset trigger immediately after starting SMS
+	  }
+	  else
+	  {
+		  SIM_SendSMS_Update(&sim_ctx, 0); // Continue SMS state machine without triggering
 	  }
 
 	  // Update DFPlayer state machine

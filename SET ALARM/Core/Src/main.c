@@ -50,8 +50,9 @@ typedef struct ALARM_TIME{
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define INIT_RTC_TIME 1     // Define to initialize RTC with default time (1: TRUE, 0: FALSE)
-#define PREDEFINED_INPUT 1  // Define to initialize Predefined Alarm Time (1: TRUE, 0: FALSE)
+#define INIT_RTC_TIME 1     // Init RTC with default time (1: On, 0: Off)
+#define PREDEFINED_INPUT 1  // Use predefined alarm time (1: On, 0: Off)
+#define USER_INPUT 0        // Allow user to set alarm time (1: On, 0: Off)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,12 +63,12 @@ typedef struct ALARM_TIME{
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim1; // Timer 1 handle for millisecond delay
-TIM_HandleTypeDef htim3; // Timer 3 handle for 1-second updates
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2; // DFPlayer communication
-UART_HandleTypeDef huart3; // SIM module communication
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 volatile uint32_t tick_ms = 0;  // Counter for mili sec
@@ -309,6 +310,10 @@ int main(void)
 	set_time.Hour = 14;
 	set_time.Minute = 31;
   #endif
+
+//  #if USER_INPUT
+//
+//  #endif
 
   // Update SMS message with the set alarm time
   sprintf(sms_message, "You need to take your medicine at %02d:%02d", set_time.Hour, set_time.Minute);

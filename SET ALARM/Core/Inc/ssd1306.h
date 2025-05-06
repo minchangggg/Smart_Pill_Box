@@ -47,7 +47,12 @@ SDA        |PB7          |Serial data line
 #include "stdlib.h"
 #include "string.h"
 
-
+/*
+SSD1306_I2C_ADDR (0x78): Địa chỉ I2C mặc định của SSD1306 (7-bit là 0x3C, 8-bit là 0x78).
+SSD1306_WIDTH (128): Chiều rộng màn hình (128 pixel).
+SSD1306_HEIGHT (64): Chiều cao màn hình (64 pixel).
+ssd1306_I2C_TIMEOUT (20000): Thời gian chờ tối đa (ms) cho giao tiếp I2C.
+*/
 /* I2C address */
 #ifndef SSD1306_I2C_ADDR
 #define SSD1306_I2C_ADDR         0x78
@@ -66,13 +71,13 @@ SDA        |PB7          |Serial data line
 
 /**
  * @brief  SSD1306 color enumeration
- */
+ SSD1306_COLOR_BLACK (0x00): Tắt pixel (màu đen).
+ SSD1306_COLOR_WHITE (0x01): Bật pixel (màu trắng hoặc xanh, tùy thuộc vào màn hình OLED).
+*/
 typedef enum {
 	SSD1306_COLOR_BLACK = 0x00, /*!< Black color, no pixel */
 	SSD1306_COLOR_WHITE = 0x01  /*!< Pixel is set. Color depends on LCD */
 } SSD1306_COLOR_t;
-
-
 
 /**
  * @brief  Initializes SSD1306 LCD
@@ -91,11 +96,14 @@ uint8_t SSD1306_Init(void);
  */
 void SSD1306_UpdateScreen(void);
 
+/*Điều khiển hiển thị*/	
 /**
  * @brief  Toggles pixels invertion inside internal RAM
  * @note   @ref SSD1306_UpdateScreen() must be called after that in order to see updated LCD screen
  * @param  None
  * @retval None
+Đảo màu toàn bộ màn hình (đen thành trắng, trắng thành đen).
+Cần gọi SSD1306_UpdateScreen() để thấy thay đổi.
  */
 void SSD1306_ToggleInvert(void);
 
@@ -104,6 +112,7 @@ void SSD1306_ToggleInvert(void);
  * @note   @ref SSD1306_UpdateScreen() must be called after that in order to see updated LCD screen
  * @param  Color: Color to be used for screen fill. This parameter can be a value of @ref SSD1306_COLOR_t enumeration
  * @retval None
+ Lấp đầy toàn bộ màn hình với một màu (đen hoặc trắng).
  */
 void SSD1306_Fill(SSD1306_COLOR_t Color);
 
@@ -117,11 +126,13 @@ void SSD1306_Fill(SSD1306_COLOR_t Color);
  */
 void SSD1306_DrawPixel(uint16_t x, uint16_t y, SSD1306_COLOR_t color);
 
+/*Hiển thị văn bản*/
 /**
  * @brief  Sets cursor pointer to desired location for strings
  * @param  x: X location. This parameter can be a value between 0 and SSD1306_WIDTH - 1
  * @param  y: Y location. This parameter can be a value between 0 and SSD1306_HEIGHT - 1
  * @retval None
+ Đặt con trỏ văn bản tại tọa độ (x, y).
  */
 void SSD1306_GotoXY(uint16_t x, uint16_t y);
 
@@ -132,6 +143,7 @@ void SSD1306_GotoXY(uint16_t x, uint16_t y);
  * @param  *Font: Pointer to @ref FontDef_t structure with used font
  * @param  color: Color used for drawing. This parameter can be a value of @ref SSD1306_COLOR_t enumeration
  * @retval Character written
+ Hiển thị một ký tự tại vị trí con trỏ, dùng font được chỉ định.
  */
 char SSD1306_Putc(char ch, FontDef_t* Font, SSD1306_COLOR_t color);
 
@@ -142,6 +154,7 @@ char SSD1306_Putc(char ch, FontDef_t* Font, SSD1306_COLOR_t color);
  * @param  *Font: Pointer to @ref FontDef_t structure with used font
  * @param  color: Color used for drawing. This parameter can be a value of @ref SSD1306_COLOR_t enumeration
  * @retval Zero on success or character value when function failed
+ Hiển thị một chuỗi ký tự.
  */
 char SSD1306_Puts(char* str, FontDef_t* Font, SSD1306_COLOR_t color);
 

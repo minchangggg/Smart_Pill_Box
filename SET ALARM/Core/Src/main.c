@@ -425,7 +425,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         else
         {
             // Reset all states outside valid window
-        	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
+	    DF_Pause(&df_ctx);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET);
             box_mode = 0;           // Ensure box is closed
             already_warned_mp3 = 0; // Reset music flag
             send_sms_now = 0;       // Reset SMS trigger
